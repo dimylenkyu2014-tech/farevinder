@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover
     import requests as http
     IMPERSONATE = {}
 
-FALLBACK_VERSION = "28.1.0"
+FALLBACK_VERSION = "29.24.0"  # последняя известная (ноябрь 2026)
 CHUNK_DAYS = 30
 
 
@@ -29,14 +29,34 @@ class Wizz:
         self.wdc = wdc
         self.base = f"https://be.wizzair.com/{self._version()}/Api"
 
+    def _ok(self, v):
+        try:
+            r = self.s.get(f"https://be.wizzair.com/{v}/Api/asset/currencies", timeout=15)
+            return r.status_code != 404
+        except Exception:  # noqa
+            return False
+
     def _version(self):
+        """Wizz меняет версию API каждые 1–2 недели. Ищем актуальную."""
+        # 1) официальный buildnumber
         try:
             txt = self.s.get("https://wizzair.com/buildnumber", timeout=20).text
-            m = re.search(r"be\.wizzair\.com/([\d.]+)", txt)
-            if m:
+            m = re.search(r"be\.wizzair\.com/(\d+\.\d+\.\d+)", txt) or re.search(r"(\d+\.\d+\.\d+)", txt)
+            if m and self._ok(m.group(1)):
+                log.info("Wizz API версия (buildnumber): %s", m.group(1))
                 return m.group(1)
+            log.warning("Wizz: buildnumber не подошёл: %r", txt[:120])
         except Exception as e:  # noqa
             log.warning("Wizz: не получил buildnumber (%s)", e)
+        # 2) перебор версий вокруг последней известной
+        major, minor = (int(x) for x in FALLBACK_VERSION.split(".")[:2])
+        cands = [f"{major}.{n}.{p}" for n in range(minor + 25, minor - 6, -1) for p in (0, 1)]
+        cands += [f"{major + 1}.{n}.0" for n in range(0, 15)]
+        for v in cands:
+            if self._ok(v):
+                log.info("Wizz API версия (перебор): %s", v)
+                return v
+        log.error("Wizz: актуальная версия API не найдена")
         return FALLBACK_VERSION
 
     def routes(self, origins):
