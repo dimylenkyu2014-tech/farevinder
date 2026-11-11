@@ -3,18 +3,19 @@
 python -m bot.query queries.json     (файл готовит bot.poll)
 python -m bot.query "14.01-17.01"    (вручную)
 """
+import argparse
 import json
 import logging
-import sys
+import os
 from datetime import timedelta
 from html import escape
 from pathlib import Path
 
 import yaml
 
-from . import ryanair, wizz, telegram
+from . import telegram
+from .collect import collect_query, merge, from_json, load_parts
 from .common import RoundTrip, log
-from .fx import FX
 from .main import fmt_line, ROOT
 from .qparse import parse, ParseError, HELP
 
@@ -46,39 +47,21 @@ def pair_wizz(outs, rets, pairs, origins, any_return):
     return trips
 
 
-def search(q, cfg):
-    cur = cfg.get("currency", "EUR")
-    fx = FX(cur)
+def search(q, cfg, data=None):
+    """data — сырые цены от bot.collect (если None — собираем сами, в одном процессе)."""
+    if data is None:
+        data = collect_query(q, cfg, q["origins"])
     origins = q["origins"]
     excl = {d.upper() for d in cfg.get("exclude_destinations") or []}
     any_ret = cfg.get("round_trip", {}).get("return_to_any_origin", True)
-    delay = cfg.get("wizz_request_delay", 1.2)
-    wdc = cfg.get("wizz_discount_club", False)
-    items, errors = [], []
-
+    errors = data["errors"]
     if q["mode"] == "rt":
-        pairs = q["pairs"]
-        ok = {(o.isoformat(), r.isoformat()) for o, r in pairs}
-        if cfg["airlines"].get("ryanair"):
-            got = ryanair.fetch_rt_windows(origins, q["windows"], fx, cur)
-            items += [t for t in got if (t.date, t.ret_date) in ok]
-        if cfg["airlines"].get("wizzair"):
-            outs_d = [p[0] for p in pairs]
-            rets_d = [p[1] for p in pairs]
-            w_out, w_ret, errors = wizz.fetch_span(origins, min(outs_d), max(outs_d), min(rets_d), max(rets_d),
-                                                   fx, delay, wdc, lambda d: d not in excl)
-            items += pair_wizz(w_out, w_ret, pairs, origins, any_ret)
+        ok = {(o.isoformat(), r.isoformat()) for o, r in q["pairs"]}
+        items = [t for t in data["rt"] if (t.date, t.ret_date) in ok]
+        items += pair_wizz(data["w_out"], data["w_ret"], q["pairs"], origins, any_ret)
     else:
-        outs = q["outs"]
-        lo, hi = min(outs), max(outs)
-        ok = {d.isoformat() for d in outs}
-        if cfg["airlines"].get("ryanair"):
-            # Ryanair отдаёт самый дешёвый день в диапазоне — этого и достаточно
-            items += [f for f in ryanair.fetch(origins, lo, hi, fx, cur) if f.date in ok]
-        if cfg["airlines"].get("wizzair"):
-            w_out, _, errors = wizz.fetch_span(origins, lo, hi, None, None, fx, delay, wdc,
-                                               lambda d: d not in excl)
-            items += [f for f in w_out if f.date in ok]
+        ok = {d.isoformat() for d in q["outs"]}
+        items = [f for f in data["ow"] + data["w_out"] if f.date in ok]
 
     items = [i for i in items if i.dest not in excl and i.origin in origins]
     if q["max_price"]:
@@ -91,14 +74,14 @@ def search(q, cfg):
     return sorted(best.values(), key=lambda i: i.price)[:TOP_N], len(best), errors
 
 
-def answer(text, cfg):
+def answer(text, cfg, data=None):
     try:
         q = parse(text)
     except ParseError as e:
         telegram.send(f"❓ {escape(str(e))}\n\n{HELP}")
         return
     log.info("Запрос: %s -> %s", text, q["title"])
-    top, total, errors = search(q, cfg)
+    top, total, errors = search(q, cfg, data)
     cur = cfg.get("currency", "EUR")
     head = f"<b>🔎 {escape(q['title'])}</b>\nиз {', '.join(q['origins'])}"
     if q["max_price"]:
@@ -117,16 +100,26 @@ def answer(text, cfg):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
-    p = Path(arg)
-    texts = json.loads(p.read_text(encoding="utf-8")) if arg.endswith(".json") and p.exists() else [arg]
+    ap = argparse.ArgumentParser()
+    ap.add_argument("text", nargs="?", default="")
+    ap.add_argument("--parts", help="папка с part-*.json от bot.collect")
+    a = ap.parse_args()
+    if a.text.endswith(".json") and Path(a.text).exists():
+        texts = json.loads(Path(a.text).read_text(encoding="utf-8"))
+    elif a.text:
+        texts = [a.text]
+    else:
+        texts = json.loads(os.environ.get("QUERIES") or "[]")
+    parts = load_parts(a.parts) if a.parts else None
     for t in texts:
-        if t.strip():
-            try:
-                answer(t, cfg)
-            except Exception as e:  # noqa
-                log.exception("Ошибка запроса")
-                telegram.send(f"⚠️ Не получилось выполнить «{escape(t)}»: {escape(str(e)[:200])}")
+        if not t.strip():
+            continue
+        data = merge([from_json(p[t]) for p in parts if t in p]) if parts is not None else None
+        try:
+            answer(t, cfg, data)
+        except Exception as e:  # noqa
+            log.exception("Ошибка запроса")
+            telegram.send(f"⚠️ Не получилось выполнить «{escape(t)}»: {escape(str(e)[:200])}")
 
 
 if __name__ == "__main__":

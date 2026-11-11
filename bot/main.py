@@ -14,9 +14,9 @@ from pathlib import Path
 
 import yaml
 
-from . import ryanair, wizz, telegram
+from . import telegram
+from .collect import collect_daily, merge, from_json, load_parts
 from .common import cheapest_per_month, pair_round_trips, from_dict, log
-from .fx import FX
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE_PATH = ROOT / "state" / "fares.json"
@@ -142,6 +142,7 @@ def main():
     ap.add_argument("--digest", action="store_true")
     ap.add_argument("--test", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--parts", help="папка с part-*.json от bot.collect")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -160,23 +161,16 @@ def main():
     min_n, max_n = rtc.get("min_nights", 2), rtc.get("max_nights", 10)
 
     now = datetime.now(timezone.utc)
-    start = now.date() + timedelta(days=1)
-    end = start + timedelta(days=cfg.get("horizon_days", 180))
-    fx = FX(cur)
-
-    ow, rt, errors = [], [], []
-    if cfg["airlines"].get("ryanair"):
-        ow += ryanair.fetch(origins, start, end, fx, cur)
-        if rt_on:
-            rt += ryanair.fetch_rt(origins, start, end, fx, min_n, max_n, cur)
-    if cfg["airlines"].get("wizzair"):
-        w_out, w_ret, we = wizz.fetch(origins, start, end, fx, cfg.get("wizz_request_delay", 1.2),
-                                      cfg.get("wizz_discount_club", False), dest_ok,
-                                      ret_extra_days=max_n if rt_on else 0)
-        ow += w_out
-        errors += we
-        if rt_on:
-            rt += pair_round_trips(w_out, w_ret, origins, min_n, max_n, rtc.get("return_to_any_origin", True))
+    if args.parts:   # результаты параллельных задач (bot.collect)
+        data = merge([from_json(p) for p in load_parts(args.parts)])
+    else:            # всё в одном процессе (локальный запуск)
+        data = collect_daily(cfg, origins)
+    errors = data["errors"]
+    ow = data["ow"] + data["w_out"]
+    rt = list(data["rt"])
+    if rt_on:
+        rt += pair_round_trips(data["w_out"], data["w_ret"], origins, min_n, max_n,
+                               rtc.get("return_to_any_origin", True))
 
     ow = [f for f in ow if dest_ok(f.dest)]
     rt = [f for f in rt if dest_ok(f.dest)]
@@ -203,7 +197,7 @@ def main():
 
     today = now.date().isoformat()
     d = cfg.get("digest", {})
-    if args.digest or (d.get("enabled") and now.hour == d.get("hour_utc", 6) and state.get("last_digest") != today):
+    if args.digest or (d.get("enabled") and now.hour >= d.get("hour_utc", 6) and state.get("last_digest") != today):
         msgs.append(build_digest(state, cfg, cur, errors))
         state["last_digest"] = today
 

@@ -25,7 +25,7 @@ class Wizz:
             "Referer": "https://wizzair.com/",
             "Content-Type": "application/json",
         })
-        self.delay = delay
+        self.delay = max(delay, 2.0)  # Wizz режет по IP при ~1 запросе/сек
         self.wdc = wdc
         self.base = f"https://be.wizzair.com/{self._version()}/Api"
         self.tt_paths = ["search/timetableV2", "search/timetable"]
@@ -103,31 +103,27 @@ class Wizz:
             "priceType": "wdc" if self.wdc else "regular",
             "adultCount": 1, "childCount": 0, "infantCount": 0,
         }
-        if self.fails >= 8:
+        if self.fails >= 5:
             raise RuntimeError("Wizz блокирует запросы — пропускаю остальные маршруты")
-        renewed = False
-        for attempt in range(3):
+        waits = [30, 60, 120]   # пауза при лимите (429/503 от CloudFront)
+        for attempt in range(len(waits) + 2):
             r = self.s.post(f"{self.base}/{self.tt_paths[0]}", json=body, timeout=30)
             if r.status_code == 404 and len(self.tt_paths) > 1:
                 log.warning("Wizz: %s не найден, пробую %s", self.tt_paths[0], self.tt_paths[1])
                 self.tt_paths.pop(0)
                 continue
-            if r.status_code == 429:
-                wait = 20 * (attempt + 1)
-                log.warning("Wizz 429 (лимит), жду %ss", wait)
-                time.sleep(wait)
-                continue
-            if r.status_code in (401, 403, 503) and not renewed and time.time() - self.last_renew > 60:
-                log.warning("Wizz %s — обновляю сессию и повторяю", r.status_code)
-                self._session()
-                renewed = True
+            if r.status_code in (429, 503) and attempt < len(waits):
+                self.delay = min(self.delay + 0.5, 4.0)   # замедляемся до конца прогона
+                log.warning("Wizz %s (лимит) — жду %ss, дальше пауза %.1fs", r.status_code, waits[attempt], self.delay)
+                time.sleep(waits[attempt])
+                if attempt == 1:
+                    self._session()
                 continue
             if r.status_code >= 400:
                 self.fails += 1
                 if not self.logged_error:
                     self.logged_error = True
-                    log.warning("Wizz ответ %s %s: %r | headers=%s", r.status_code, self.tt_paths[0],
-                                (r.text or "")[:300], dict(list(r.headers.items())[:15]))
+                    log.warning("Wizz ответ %s %s: %r", r.status_code, self.tt_paths[0], (r.text or "")[:300])
                 raise RuntimeError(f"HTTP {r.status_code}")
             self.fails = 0
             return r.json()
@@ -199,8 +195,8 @@ def fetch_span(origins, out_from, out_to, ret_from=None, ret_to=None, fx=None, d
         for dest, name in dests.items():
             if not dest_filter(dest):
                 continue
-            if w.fails >= 8:
-                log.error("Wizz: 8 ошибок подряд — прекращаю опрос Wizz")
+            if w.fails >= 5:
+                log.error("Wizz: 5 ошибок подряд — прекращаю опрос Wizz")
                 return outs, rets, errors
             cur = first
             while cur <= last:

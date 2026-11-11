@@ -46,7 +46,7 @@ def main():
             continue
         n = len(q.get("pairs") or q.get("outs"))
         send(f"🔎 Принял: <b>{q['title']}</b>\nиз {', '.join(q['origins'])}"
-             f" ({n} вариант. дат). Ищу, пришлю через 5–15 минут.")
+             f" ({n} вариант. дат). Ищу, пришлю через 3–10 минут.")
         queries.append(text)
 
     with open(out_file, "w", encoding="utf-8") as f:
@@ -55,6 +55,7 @@ def main():
     if gh:
         with open(gh, "a") as f:
             f.write(f"has={'true' if queries else 'false'}\n")
+            f.write(f"queries={json.dumps(queries, ensure_ascii=True)}\n")
     print(f"запросов: {len(queries)}")
 
 
