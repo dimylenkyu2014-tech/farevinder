@@ -2,7 +2,7 @@ name: Fare Finder
 
 on:
   schedule:
-    - cron: "0 6,18 * * *"
+    - cron: "0 6,18 * * *"    # 8:00 и 20:00 по Варне (зимой)
   workflow_dispatch:
     inputs:
       mode:
@@ -17,9 +17,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  run:
+  # 8 параллельных задач: 4 города × 2 половины направлений. У каждой свой IP -> Wizz не душит лимитом.
+  collect:
+    if: github.event.inputs.mode != 'test'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        origin: [VAR, SOF, OTP, BOJ]
+        shard: [0, 1]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,20 +34,45 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - name: Check fares
+      - run: python -m bot.collect daily --origin ${{ matrix.origin }} --shard ${{ matrix.shard }} --shards 2 --out part.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: part-${{ matrix.origin }}-${{ matrix.shard }}
+          path: part.json
+          retention-days: 1
+
+  report:
+    needs: collect
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        if: github.event.inputs.mode != 'test'
+        with:
+          pattern: part-*
+          path: parts
+      - name: Report
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           case "${{ github.event.inputs.mode }}" in
-            digest) python -m bot.main --digest ;;
+            digest) python -m bot.main --parts parts --digest ;;
             test)   python -m bot.main --test ;;
-            *)      python -m bot.main ;;
+            *)      python -m bot.main --parts parts ;;
           esac
       - name: Save state
+        if: github.event.inputs.mode != 'test'
         run: |
           git config user.name "fare-bot"
           git config user.email "fare-bot@users.noreply.github.com"
           git add state/fares.json
           git diff --cached --quiet || git commit -m "update fares $(date -u +%F_%H%M)"
-          git push
+          git pull --rebase -q && git push
