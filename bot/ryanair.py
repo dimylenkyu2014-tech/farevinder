@@ -111,3 +111,30 @@ def fetch_rt(origins, start, end, fx, min_n, max_n, currency="EUR") -> list:
                 log.warning("Ryanair RT %s %s: ошибка %s", origin, d_from, e)
             time.sleep(0.5)
     return trips
+
+
+def fetch_rt_windows(origins, windows, fx, currency="EUR") -> list:
+    """windows: [(out_from, out_to, ret_from, ret_to, min_nights, max_nights), ...].
+    Один запрос на (город вылета × окно) — самый дешёвый вариант в каждое направление."""
+    s = requests.Session()
+    s.headers.update({"User-Agent": UA, "Accept": "application/json"})
+    trips = []
+    for origin in origins:
+        for of, ot, rf, rt, mn, mx in windows:
+            params = {
+                "departureAirportIataCode": origin,
+                "outboundDepartureDateFrom": of.isoformat(), "outboundDepartureDateTo": ot.isoformat(),
+                "inboundDepartureDateFrom": rf.isoformat(), "inboundDepartureDateTo": rt.isoformat(),
+                "durationFrom": mn, "durationTo": mx,
+                "currency": currency, "market": "en-gb", "adultPaxCount": 1, "language": "en",
+            }
+            try:
+                r = s.get(RT_URL, params=params, timeout=30)
+                if r.status_code == 404:
+                    break
+                r.raise_for_status()
+                trips += parse_rt(r.json(), fx)
+            except Exception as e:  # noqa
+                log.warning("Ryanair RT %s %s: ошибка %s", origin, of, e)
+            time.sleep(0.4)
+    return trips

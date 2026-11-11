@@ -122,9 +122,26 @@ def parse_timetable(data, dest_name, fx, key="outboundFlights"):
     return out
 
 
-def fetch(origins, start, end, fx, delay=1.2, wdc=False, dest_filter=lambda d: True, ret_extra_days=0):
-    """Возвращает (рейсы туда, рейсы обратно в наши города, ошибки).
-    ret_extra_days: насколько дальше horizon тянуть обратные рейсы (= max_nights)."""
+def _split(data, origin, dest_name, fx):
+    """Разбирает ответ timetable на (туда, обратно) по аэропорту вылета —
+    Wizz кладёт единственную ногу в outboundFlights, даже если это обратный рейс."""
+    allf = parse_timetable(data, dest_name, fx, "outboundFlights") + parse_timetable(data, dest_name, fx, "returnFlights")
+    outs = [f for f in allf if f.origin == origin]
+    rets = [f for f in allf if f.origin != origin]
+    for r in rets:
+        r.dest_name = origin
+    return outs, rets
+
+
+def _clip(a, b, lo, hi):
+    lo2, hi2 = max(a, lo), min(b, hi)
+    return (lo2, hi2) if lo2 <= hi2 else None
+
+
+def fetch_span(origins, out_from, out_to, ret_from=None, ret_to=None, fx=None, delay=1.2, wdc=False,
+               dest_filter=lambda d: True):
+    """Цены по дням: туда в [out_from, out_to], обратно (если задано) в [ret_from, ret_to].
+    Возвращает (туда, обратно, ошибки)."""
     try:
         w = Wizz(delay=delay, wdc=wdc)
         net = w.routes(origins)
@@ -133,25 +150,33 @@ def fetch(origins, start, end, fx, delay=1.2, wdc=False, dest_filter=lambda d: T
         return [], [], [f"Wizz Air недоступен: {e}"]
 
     outs, rets, errors = [], [], []
-    ret_end = end + timedelta(days=ret_extra_days)
+    first = min(out_from, ret_from or out_from)
+    last = max(out_to, ret_to or out_to)
     for origin, dests in net.items():
         for dest, name in dests.items():
             if not dest_filter(dest):
                 continue
-            cur = start
-            last = ret_end if ret_extra_days else end
+            cur = first
             while cur <= last:
                 to = cur + timedelta(days=CHUNK_DAYS - 1)
-                out_rng = (cur, min(end, to)) if cur <= end else None
-                ret_rng = (cur, min(ret_end, to)) if ret_extra_days else None
-                try:
-                    data = w.timetable(origin, dest, out_rng, ret_rng)
-                    outs += parse_timetable(data, name, fx, "outboundFlights")
-                    rets += parse_timetable(data, origin, fx, "returnFlights")
-                except Exception as e:  # noqa
-                    errors.append(f"{origin}-{dest}: {e}")
-                    log.warning("Wizz %s-%s %s: %s", origin, dest, cur, e)
-                time.sleep(w.delay)
+                o_rng = _clip(cur, to, out_from, out_to)
+                r_rng = _clip(cur, to, ret_from, ret_to) if ret_from else None
+                if o_rng or r_rng:
+                    try:
+                        o, r = _split(w.timetable(origin, dest, o_rng, r_rng), origin, name, fx)
+                        outs += o
+                        rets += r
+                    except Exception as e:  # noqa
+                        errors.append(f"{origin}-{dest}: {e}")
+                        log.warning("Wizz %s-%s %s: %s", origin, dest, cur, e)
+                    time.sleep(w.delay)
                 cur = to + timedelta(days=1)
         log.info("Wizz %s: %d маршрутов обработано", origin, len(dests))
     return outs, rets, errors
+
+
+def fetch(origins, start, end, fx, delay=1.2, wdc=False, dest_filter=lambda d: True, ret_extra_days=0):
+    """Для регулярной проверки: туда в [start, end], обратно в [start, end + ret_extra_days]."""
+    if ret_extra_days:
+        return fetch_span(origins, start, end, start, end + timedelta(days=ret_extra_days), fx, delay, wdc, dest_filter)
+    return fetch_span(origins, start, end, None, None, fx, delay, wdc, dest_filter)
