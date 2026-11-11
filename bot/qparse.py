@@ -32,7 +32,8 @@ HELP = """<b>Как искать билеты</b>
 <code>пт-вс 01.02-31.03</code> — то же в своём периоде
 <code>в одну сторону 14.01±2</code> — только туда
 
-Добавки: <code>из Варны</code> / <code>из SOF,OTP</code> — откуда; <code>до 80</code> — не дороже 80 €.
+Добавки: <code>все</code> — показать все направления (по умолчанию ТОП-15); <code>топ 30</code> — первые 30;
+<code>из Варны</code> / <code>из SOF,OTP</code> — откуда; <code>до 80</code> — не дороже 80 €.
 Ответ придёт через 5–15 минут."""
 
 
@@ -94,6 +95,16 @@ def parse(text, today=None):
     if m:
         low = low[:m.start()] + low[m.end():]
 
+    top = None                       # None = по умолчанию из config, 0 = все
+    m = re.search(r"\bвсе\b|\ball\b", low)
+    if m:
+        top = 0
+        low = low[:m.start()] + low[m.end():]
+    m = re.search(r"\bтоп\s*-?\s*(\d{1,3})\b", low)
+    if m:
+        top = int(m.group(1))
+        low = low[:m.start()] + low[m.end():]
+
     one_way = bool(re.search(r"одну|односторон|\bow\b|one", low))
 
     flex = [int(x) for x in re.findall(r"(?:±|\+-|\+/-)\s*(\d{1,2})", low)]
@@ -133,7 +144,7 @@ def parse(text, today=None):
             raise ParseError("в этом периоде нет подходящих дат")
         title = (f"вылет {wm.group(1).replace(' ', '')}, возврат {wm.group(2).replace(' ', '')}, "
                  f"{fmt(p_from)} – {fmt(p_to)}")
-        return _result("rt", pairs, origins, max_price, title)
+        return _result("rt", pairs, origins, max_price, title, top)
 
     if not dates:
         raise ParseError("не нашёл даты")
@@ -153,7 +164,7 @@ def parse(text, today=None):
         outs = {lo + timedelta(days=i) for i in range((hi - lo).days + 1)}
         title = fmt(lo) if lo == hi else f"{fmt(lo)} – {fmt(hi)}"
         return {"mode": "ow", "outs": outs, "origins": origins, "max_price": max_price,
-                "title": "в одну сторону, " + title}
+                "title": "в одну сторону, " + title, "top": top}
 
     # --- точные даты ± гибкость ---
     d1 = _resolve(*dates[0], today)
@@ -172,10 +183,10 @@ def parse(text, today=None):
     if not pairs:
         raise ParseError("даты уже прошли или обратно раньше, чем туда")
     title = f"туда {fmt(d1)}{f' ±{f1}' if f1 else ''}, обратно {fmt(d2)}{f' ±{f2}' if f2 else ''}"
-    return _result("rt", pairs, origins, max_price, title)
+    return _result("rt", pairs, origins, max_price, title, top)
 
 
-def _result(mode, pairs, origins, max_price, title):
+def _result(mode, pairs, origins, max_price, title, top=None):
     # окна для Ryanair: группируем вылеты по неделям
     weeks = {}
     for o, r in pairs:
@@ -187,4 +198,4 @@ def _result(mode, pairs, origins, max_price, title):
         windows.append((min(outs), max(outs), min(rets), max(rets), min(nights), max(nights)))
     windows.sort()
     return {"mode": mode, "pairs": pairs, "origins": origins, "max_price": max_price,
-            "title": title, "windows": windows}
+            "title": title, "windows": windows, "top": top}

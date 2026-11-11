@@ -71,7 +71,11 @@ def search(q, cfg, data=None):
     for i in items:
         if i.dest not in best or i.price < best[i.dest].price:
             best[i.dest] = i
-    return sorted(best.values(), key=lambda i: i.price)[:TOP_N], len(best), errors
+    n = q.get("top")
+    if n is None:
+        n = cfg.get("query_top_n", TOP_N)
+    ranked = sorted(best.values(), key=lambda i: i.price)
+    return (ranked[:n] if n else ranked), len(best), errors
 
 
 def answer(text, cfg, data=None):
@@ -89,7 +93,8 @@ def answer(text, cfg, data=None):
     if not top:
         msg = head + "\n\nНичего не нашлось 😕 Попробуй расширить даты (±1–2 дня) или другие дни недели."
     else:
-        lines = [head + f"\n\n<b>ТОП-{len(top)}</b> из {total} направлений:"]
+        label = f"Все {total} направлений" if len(top) == total else f"ТОП-{len(top)} из {total} направлений"
+        lines = [head + f"\n\n<b>{label}</b> (по цене):"]
         lines += [fmt_line(i, cur) for i in top]
         msg = "\n\n".join(lines)
     if errors:
