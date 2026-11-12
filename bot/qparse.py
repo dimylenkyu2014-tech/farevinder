@@ -31,6 +31,8 @@ HELP = """<b>Как искать билеты</b>
 <code>чт,пт-вс,пн фев-мар</code> — вылет чт/пт, возврат вс/пн
 <code>пт-вс 01.02-31.03</code> — то же в своём периоде
 <code>в одну сторону 14.01±2</code> — только туда
+<code>из Варны</code> — любые даты на 3 месяца вперёд (2–10 ночей)
+<code>из Варны январь 3-5 ночей</code> — любые даты января
 
 Добавки: <code>все</code> — показать все направления (по умолчанию ТОП-15); <code>топ 30</code> — первые 30;
 <code>из Варны</code> / <code>из SOF,OTP</code> — откуда; <code>до 80</code> — не дороже 80 €.
@@ -105,6 +107,14 @@ def parse(text, today=None):
         top = int(m.group(1))
         low = low[:m.start()] + low[m.end():]
 
+    # длина поездки: «3-5 ночей», «4 ночи»
+    nights = None
+    m = re.search(r"(\d{1,2})\s*-\s*(\d{1,2})\s*ноч", low) or re.search(r"(\d{1,2})\s*ноч", low)
+    if m:
+        a = int(m.group(1)); b = int(m.group(2)) if m.lastindex > 1 else a
+        nights = (min(a, b), max(a, b))
+        low = low[:m.start()] + low[m.end():]
+
     one_way = bool(re.search(r"одну|односторон|\bow\b|one", low))
 
     flex = [int(x) for x in re.findall(r"(?:±|\+-|\+/-)\s*(\d{1,2})", low)]
@@ -140,6 +150,8 @@ def parse(text, today=None):
                     if r.weekday() in ret_wd:
                         pairs.add((d, r))
             d += timedelta(days=1)
+        if nights:
+            pairs = {(o, r) for o, r in pairs if nights[0] <= (r - o).days <= nights[1]}
         if not pairs:
             raise ParseError("в этом периоде нет подходящих дат")
         title = (f"вылет {wm.group(1).replace(' ', '')}, возврат {wm.group(2).replace(' ', '')}, "
@@ -147,7 +159,25 @@ def parse(text, today=None):
         return _result("rt", pairs, origins, max_price, title, top)
 
     if not dates:
-        raise ParseError("не нашёл даты")
+        # без дат: ближайшие 3 месяца (или указанные месяцы), поездка 2–10 ночей
+        months = re.findall(MON_RE, low)
+        if months:
+            p_from, p_to = _month_range(_month_idx(months[0]), _month_idx(months[-1]), today)
+        else:
+            p_from, p_to = tomorrow, today + timedelta(days=90)
+        period = f"{fmt(p_from)} – {fmt(p_to)}"
+        if one_way:
+            outs = {p_from + timedelta(days=i) for i in range((p_to - p_from).days + 1)}
+            return {"mode": "ow", "outs": outs, "origins": origins, "max_price": max_price,
+                    "title": f"в одну сторону, любые даты {period}", "top": top}
+        n1, n2 = nights or (2, 10)
+        pairs = set()
+        d = p_from
+        while d <= p_to:
+            for k in range(n1, n2 + 1):
+                pairs.add((d, d + timedelta(days=k)))
+            d += timedelta(days=1)
+        return _result("rt", pairs, origins, max_price, f"любые даты {period}, {n1 if n1 == n2 else f'{n1}–{n2}'} ноч.", top)
 
     # --- в одну сторону ---
     if one_way or len(dates) == 1:
